@@ -95,7 +95,9 @@ pub use ovo_sandbox as sandbox;
 pub use ovo_sandbox::LandlockBackend;
 #[cfg(feature = "sandbox")]
 pub use ovo_sandbox::{
-    FsPolicy, NetPolicy, NoSandbox, SandboxBackend, SandboxError, SandboxPolicy, TrustedExecution,
+    AllowAllExecPolicy, DenyAllExecPolicy, ExecDecision, ExecPolicy, FsPolicy, NetPolicy,
+    NoSandbox, PrefixExecPolicy, PrefixRule, SandboxBackend, SandboxError, SandboxPolicy,
+    SharedExecPolicy, TrustedExecution,
 };
 #[cfg(all(feature = "seatbelt", target_os = "macos"))]
 pub use ovo_sandbox::{SANDBOX_EXEC, SeatbeltBackend};

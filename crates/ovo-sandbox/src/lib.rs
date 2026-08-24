@@ -12,6 +12,7 @@
     )
 )]
 
+mod exec_policy;
 #[cfg(all(feature = "landlock", target_os = "linux"))]
 mod landlock;
 #[cfg(target_os = "linux")]
@@ -22,6 +23,10 @@ mod seatbelt;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub use exec_policy::{
+    AllowAllExecPolicy, DenyAllExecPolicy, ExecDecision, ExecPolicy, PrefixExecPolicy, PrefixRule,
+    SharedExecPolicy,
+};
 #[cfg(all(feature = "landlock", target_os = "linux"))]
 pub use landlock::LandlockBackend;
 #[cfg(target_os = "linux")]

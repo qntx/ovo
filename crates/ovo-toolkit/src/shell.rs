@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ovo_sandbox::{NoSandbox, SandboxBackend, SandboxPolicy, TrustedExecution};
+use ovo_sandbox::{
+    AllowAllExecPolicy, DenyAllExecPolicy, ExecPolicy, NoSandbox, SandboxBackend, SandboxPolicy,
+    SharedExecPolicy, TrustedExecution,
+};
 use ovo_tools::stream::ToolStream;
 use ovo_tools::{
     DynTool, ToolCallContext, ToolError, ToolMetadata, ToolProgress, ToolResult, with_progress,
@@ -16,6 +19,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::jail::resolve_root;
+
+/// Fail closed before tokenize: a prefix allowlist on `sh -c` is not a security boundary.
+const META_CHARS: &[char] = &['|', '&', ';', '\n', '`', '$', '(', ')', '<', '>'];
 
 /// Default command timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,7 +60,9 @@ impl std::fmt::Debug for ShellIsolation {
 /// - [`ShellTool::sandboxed`] — wrap via [`SandboxBackend`]
 /// - [`ShellTool::with_no_sandbox`] — backend present but non-enforcing
 ///
-/// There is no `Default` impl: silent trust is forbidden (secure-by-default).
+/// Argv is checked by [`ExecPolicy`] before wrap. Trusted uses
+/// [`AllowAllExecPolicy`]; sandboxed and [`Self::with_no_sandbox`] use
+/// [`DenyAllExecPolicy`]. There is no `Default` impl: silent trust is forbidden.
 #[derive(Debug, Clone)]
 pub struct ShellTool {
     /// Jail / working directory.
@@ -64,10 +72,13 @@ pub struct ShellTool {
     /// Max captured output bytes.
     pub max_output: usize,
     isolation: ShellIsolation,
+    exec_policy: SharedExecPolicy,
 }
 
 impl ShellTool {
     /// Trusted host: no process sandbox (explicit opt-out).
+    ///
+    /// Uses [`AllowAllExecPolicy`]. Metacharacter scanning still applies.
     #[must_use]
     pub fn trusted(root: impl Into<PathBuf>, _trust: TrustedExecution) -> Self {
         Self {
@@ -75,10 +86,13 @@ impl ShellTool {
             timeout: DEFAULT_TIMEOUT,
             max_output: DEFAULT_MAX_OUTPUT,
             isolation: ShellIsolation::Trusted,
+            exec_policy: Arc::new(AllowAllExecPolicy),
         }
     }
 
     /// Sandboxed shell: command is wrapped by `backend` under `policy`.
+    ///
+    /// Defaults to [`DenyAllExecPolicy`]; use [`Self::with_exec_policy`] to allow commands.
     #[must_use]
     pub fn sandboxed(
         root: impl Into<PathBuf>,
@@ -90,11 +104,12 @@ impl ShellTool {
             timeout: DEFAULT_TIMEOUT,
             max_output: DEFAULT_MAX_OUTPUT,
             isolation: ShellIsolation::Sandboxed { backend, policy },
+            exec_policy: Arc::new(DenyAllExecPolicy),
         }
     }
 
-    /// Explicit `NoSandbox` backend (same non-enforcement as trusted, but
-    /// keeps a [`SandboxBackend`] name in the isolation record).
+    /// Explicit `NoSandbox` backend (OS wrap is a no-op; argv policy still
+    /// defaults to [`DenyAllExecPolicy`]).
     #[must_use]
     pub fn with_no_sandbox(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
@@ -103,6 +118,13 @@ impl ShellTool {
             Arc::new(NoSandbox),
             SandboxPolicy::workspace(root),
         )
+    }
+
+    /// Replace the argv allowlist consulted before wrap.
+    #[must_use]
+    pub fn with_exec_policy(mut self, policy: Arc<dyn ExecPolicy>) -> Self {
+        self.exec_policy = policy;
+        self
     }
 
     /// Set timeout.
@@ -167,11 +189,24 @@ impl DynTool for ShellTool {
         let max_output = self.max_output;
         let cancel = ctx.cancel.clone();
         let isolation = self.isolation.clone();
+        let exec_policy = Arc::clone(&self.exec_policy);
         with_progress(
             vec![ToolProgress::text(format!("shell: {command}"))],
             move || async move {
                 if cancel.is_cancelled() {
                     return Err(ovo_tools::error::codes::cancelled());
+                }
+                if command.contains(META_CHARS) {
+                    return Err(ovo_tools::error::codes::denied(
+                        "exec policy: metacharacter",
+                    ));
+                }
+                let tokens: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+                if tokens.is_empty() {
+                    return Err(ovo_tools::error::codes::denied("exec policy: deny"));
+                }
+                if !exec_policy.decide(&tokens).allow_wrap() {
+                    return Err(ovo_tools::error::codes::denied("exec policy: deny"));
                 }
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(&command).current_dir(&root);
@@ -260,9 +295,49 @@ fn truncate_in_place(s: &mut String, max: usize) {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "unit tests")]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ovo_sandbox::{ExecDecision, SandboxError};
+    use ovo_types::ErrorCode;
     use tempfile::tempdir;
 
     use super::*;
+
+    struct CountingBackend {
+        wraps: AtomicUsize,
+    }
+
+    impl SandboxBackend for CountingBackend {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn wrap(&self, _policy: &SandboxPolicy, cmd: Command) -> Result<Command, SandboxError> {
+            self.wraps.fetch_add(1, Ordering::SeqCst);
+            let std = cmd.as_std();
+            let mut copied = Command::new(std.get_program());
+            copied.args(std.get_args());
+            if let Some(dir) = std.get_current_dir() {
+                copied.current_dir(dir);
+            }
+            for (k, v) in std.get_envs() {
+                if let Some(val) = v {
+                    copied.env(k, val);
+                }
+            }
+            copied.kill_on_drop(true);
+            Ok(copied)
+        }
+    }
+
+    #[derive(Debug)]
+    struct AskAllExecPolicy;
+
+    impl ExecPolicy for AskAllExecPolicy {
+        fn decide(&self, _argv: &[String]) -> ExecDecision {
+            ExecDecision::Ask
+        }
+    }
 
     #[tokio::test]
     async fn echoes_in_jail_trusted() {
@@ -274,7 +349,7 @@ mod tests {
                     cwd: Some(dir.path().to_path_buf()),
                     ..ToolCallContext::default()
                 },
-                json!({"command": "echo hi && pwd"}),
+                json!({"command": "echo hi"}),
             )
             .await
             .expect("shell");
@@ -284,7 +359,8 @@ mod tests {
     #[tokio::test]
     async fn echoes_with_no_sandbox_backend() {
         let dir = tempdir().expect("temp");
-        let tool = ShellTool::with_no_sandbox(dir.path());
+        let tool =
+            ShellTool::with_no_sandbox(dir.path()).with_exec_policy(Arc::new(AllowAllExecPolicy));
         let r = tool
             .call(
                 ToolCallContext {
@@ -303,7 +379,7 @@ mod tests {
     async fn seatbelt_shell_allows_inside_blocks_outside() {
         use std::sync::Arc;
 
-        use ovo_sandbox::{SandboxPolicy, SeatbeltBackend};
+        use ovo_sandbox::{PrefixExecPolicy, SandboxPolicy, SeatbeltBackend};
 
         let dir = tempdir().expect("temp");
         let root = dir.path().canonicalize().expect("canon");
@@ -319,7 +395,8 @@ mod tests {
             root.clone(),
             Arc::new(SeatbeltBackend),
             SandboxPolicy::workspace(root.clone()),
-        );
+        )
+        .with_exec_policy(Arc::new(PrefixExecPolicy::workspace_shell()));
 
         let inside = tool
             .call(
@@ -360,7 +437,7 @@ mod tests {
     async fn landlock_shell_allows_inside_blocks_outside() {
         use std::sync::Arc;
 
-        use ovo_sandbox::{FsPolicy, LandlockBackend, NetPolicy, SandboxPolicy};
+        use ovo_sandbox::{FsPolicy, LandlockBackend, NetPolicy, PrefixExecPolicy, SandboxPolicy};
 
         let Some(helper) = std::env::var_os("OVO_LANDLOCK_HELPER") else {
             return;
@@ -385,7 +462,8 @@ mod tests {
                 },
                 net: NetPolicy::Allowed,
             },
-        );
+        )
+        .with_exec_policy(Arc::new(PrefixExecPolicy::workspace_shell()));
 
         let inside = tool
             .call(
@@ -419,5 +497,172 @@ mod tests {
             out.content
         );
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[tokio::test]
+    async fn metachar_semicolon_denied() {
+        let dir = tempdir().expect("temp");
+        let backend = Arc::new(CountingBackend {
+            wraps: AtomicUsize::new(0),
+        });
+        let isolation: Arc<dyn SandboxBackend> = backend.clone();
+        let tool =
+            ShellTool::sandboxed(dir.path(), isolation, SandboxPolicy::workspace(dir.path()))
+                .with_exec_policy(Arc::new(AllowAllExecPolicy));
+        let err = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(dir.path().to_path_buf()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": "ls; rm -rf /"}),
+            )
+            .await
+            .expect_err("denied");
+        assert_eq!(err.code(), ErrorCode::ToolDenied);
+        assert_eq!(backend.wraps.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn metachar_dollar_denied() {
+        let dir = tempdir().expect("temp");
+        let tool = ShellTool::trusted(dir.path(), TrustedExecution);
+        let err = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(dir.path().to_path_buf()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": "echo $(whoami)"}),
+            )
+            .await
+            .expect_err("denied");
+        assert_eq!(err.code(), ErrorCode::ToolDenied);
+    }
+
+    #[tokio::test]
+    async fn metachar_pipe_denied() {
+        let dir = tempdir().expect("temp");
+        let tool = ShellTool::trusted(dir.path(), TrustedExecution);
+        let err = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(dir.path().to_path_buf()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": "ls | wc"}),
+            )
+            .await
+            .expect_err("denied");
+        assert_eq!(err.code(), ErrorCode::ToolDenied);
+    }
+
+    #[tokio::test]
+    async fn deny_all_default_sandboxed() {
+        let dir = tempdir().expect("temp");
+        let tool = ShellTool::sandboxed(
+            dir.path(),
+            Arc::new(NoSandbox),
+            SandboxPolicy::workspace(dir.path()),
+        );
+        let err = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(dir.path().to_path_buf()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": "echo hi"}),
+            )
+            .await
+            .expect_err("denied");
+        assert_eq!(err.code(), ErrorCode::ToolDenied);
+    }
+
+    #[tokio::test]
+    async fn ask_maps_to_denied() {
+        let dir = tempdir().expect("temp");
+        let backend = Arc::new(CountingBackend {
+            wraps: AtomicUsize::new(0),
+        });
+        let isolation: Arc<dyn SandboxBackend> = backend.clone();
+        let tool =
+            ShellTool::sandboxed(dir.path(), isolation, SandboxPolicy::workspace(dir.path()))
+                .with_exec_policy(Arc::new(AskAllExecPolicy));
+        let err = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(dir.path().to_path_buf()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": "echo hi"}),
+            )
+            .await
+            .expect_err("denied");
+        assert_eq!(err.code(), ErrorCode::ToolDenied);
+        assert_eq!(backend.wraps.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        all(feature = "seatbelt", target_os = "macos"),
+        all(feature = "landlock", target_os = "linux"),
+    ))]
+    async fn allow_cat_does_not_skip_os_jail() {
+        use ovo_sandbox::PrefixExecPolicy;
+
+        let dir = tempdir().expect("temp");
+        let root = dir.path().canonicalize().expect("canon");
+        let outside = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME")
+            .join(format!("ovo_policy_out_{}", std::process::id()));
+        std::fs::write(&outside, b"secret").expect("out");
+
+        #[cfg(all(feature = "seatbelt", target_os = "macos"))]
+        let tool = {
+            use ovo_sandbox::SeatbeltBackend;
+            ShellTool::sandboxed(
+                root.clone(),
+                Arc::new(SeatbeltBackend),
+                SandboxPolicy::workspace(root.clone()),
+            )
+            .with_exec_policy(Arc::new(PrefixExecPolicy::workspace_shell()))
+        };
+        #[cfg(all(feature = "landlock", target_os = "linux"))]
+        let tool = {
+            use ovo_sandbox::{FsPolicy, LandlockBackend, NetPolicy};
+            let Some(helper) = std::env::var_os("OVO_LANDLOCK_HELPER") else {
+                let _ = std::fs::remove_file(&outside);
+                return;
+            };
+            ShellTool::sandboxed(
+                root.clone(),
+                Arc::new(LandlockBackend::with_helper(helper)),
+                SandboxPolicy {
+                    fs: FsPolicy::ReadWrite {
+                        paths: vec![root.clone()],
+                    },
+                    net: NetPolicy::Allowed,
+                },
+            )
+            .with_exec_policy(Arc::new(PrefixExecPolicy::workspace_shell()))
+        };
+
+        let result = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(root),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": format!("cat {}", outside.display())}),
+            )
+            .await;
+        let _ = std::fs::remove_file(&outside);
+        let out = result.expect("outside cat must reach OS jail, not exec policy");
+        assert!(
+            out.is_error,
+            "OS jail must fail the outside read: {}",
+            out.content
+        );
     }
 }
