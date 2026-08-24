@@ -4,6 +4,13 @@
 //! [`tokio::process::Command`] with host-kernel policies.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(all(feature = "landlock", target_os = "linux")),
+    allow(
+        unused_crate_dependencies,
+        reason = "serde_json is for Landlock wrap JSON policy; unused when wrap is cfg'd out"
+    )
+)]
 
 #[cfg(all(feature = "landlock", target_os = "linux"))]
 mod landlock;
@@ -102,7 +109,8 @@ pub trait SandboxBackend: Send + Sync {
     fn wrap(&self, policy: &SandboxPolicy, cmd: Command) -> Result<Command, SandboxError>;
 }
 
-/// Non-enforcing backend: returns the command unchanged.
+/// Non-enforcing backend: argv, env, and stdio are left unchanged;
+/// `kill_on_drop(true)` is always applied.
 ///
 /// Prefer [`TrustedExecution`] on tools when opting out of process sandboxing.
 /// Use this when a [`SandboxBackend`] value is required without enforcement.
@@ -158,17 +166,6 @@ pub(crate) fn require_absolute(p: &Path) -> Result<PathBuf, SandboxError> {
     }
 }
 
-#[cfg_attr(
-    not(all(feature = "landlock", target_os = "linux")),
-    allow(
-        dead_code,
-        reason = "JSON policy encoding is used by Landlock wrap; keep serde_json live off Linux"
-    )
-)]
-pub(crate) fn policy_to_json(policy: &SandboxPolicy) -> Result<String, SandboxError> {
-    serde_json::to_string(policy).map_err(|e| SandboxError::Failed(e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +173,7 @@ mod tests {
     #[test]
     fn workspace_policy_serde() {
         let p = SandboxPolicy::workspace("/tmp/ws");
-        let raw = policy_to_json(&p).expect("ser");
+        let raw = serde_json::to_string(&p).expect("ser");
         let back: SandboxPolicy = serde_json::from_str(&raw).expect("de");
         assert_eq!(back.net, NetPolicy::Denied);
         assert!(matches!(back.fs, FsPolicy::ReadWrite { .. }));
@@ -192,9 +189,8 @@ mod tests {
 
     #[test]
     fn require_absolute_rejects_relative() {
-        let dir = tempfile::tempdir().expect("temp");
-        let got = require_absolute(dir.path()).expect("abs");
-        assert_eq!(got, dir.path());
+        let got = require_absolute(Path::new("/tmp")).expect("abs");
+        assert_eq!(got, Path::new("/tmp"));
         let err = require_absolute(Path::new("relative")).expect_err("rel");
         assert!(matches!(err, SandboxError::Denied(_)), "{err:?}");
     }

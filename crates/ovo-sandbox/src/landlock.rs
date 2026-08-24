@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 
 use crate::{
-    FsPolicy, SandboxBackend, SandboxError, SandboxPolicy, policy_to_json, require_absolute,
-    take_command_spec,
+    FsPolicy, SandboxBackend, SandboxError, SandboxPolicy, require_absolute, take_command_spec,
 };
 
 /// Linux Landlock backend: prefixes commands with the `ovo-landlock` helper.
@@ -96,7 +95,8 @@ impl SandboxBackend for LandlockBackend {
                 }
             }
         }
-        let json = policy_to_json(policy)?;
+        let json =
+            serde_json::to_string(policy).map_err(|e| SandboxError::Failed(e.to_string()))?;
         if !self.helper.is_file() {
             return Err(SandboxError::Failed(format!(
                 "ovo-landlock helper not found: {}",

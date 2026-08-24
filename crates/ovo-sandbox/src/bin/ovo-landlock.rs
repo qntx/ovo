@@ -1,9 +1,6 @@
 //! Landlock helper: apply policy then exec. Linux-only enforcement.
 
 #![forbid(unsafe_code)]
-// Per-target lint: the bin crate must name every package dep. Helper uses
-// ovo_sandbox + serde_json (+ landlock via lib apply). Do not dummy-use
-// tokio/landlock/serde/thiserror.
 #![allow(
     unused_crate_dependencies,
     reason = "bin uses a subset of package deps"

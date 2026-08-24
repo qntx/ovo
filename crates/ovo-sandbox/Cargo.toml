@@ -26,6 +26,8 @@ landlock = { version = "0.4.7" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 tempfile = { workspace = true }
 
 [[bin]]
