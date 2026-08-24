@@ -26,6 +26,11 @@
     reason = "facade re-exports optional workspace crates"
 )]
 
+#[cfg(all(feature = "runtime", feature = "toolkit"))]
+use std::path::PathBuf;
+#[cfg(all(feature = "runtime", feature = "toolkit"))]
+use std::sync::Arc;
+
 #[cfg(feature = "runtime")]
 pub use ovo_agent as agent;
 #[cfg(feature = "runtime")]
@@ -74,15 +79,15 @@ pub use ovo_protocol::{
 pub use ovo_runtime as runtime;
 #[cfg(feature = "runtime")]
 pub use ovo_runtime::{
-    AgentRunResult, CompactionOutcome, CompactionStrategy, CompletionToolGate, ConversationState,
-    DEFAULT_MAX_CONCURRENT_CHILDREN, DEFAULT_MAX_SPAWN_DEPTH, EventBus, EventSink, GateChain,
-    GateDecision, HARD_STOP_THRESHOLD, InProcessHost, InProcessIsolation, IsolationBackend,
-    IsolationEnv, LifecycleFanout, MaxMessages, MetricsSink, NUDGE_THRESHOLD, NoopLifecycle,
-    NoopMetrics, Session, SessionHost, SharedMetrics, SpawnAgentTool, SpawnOpts,
-    StationarityAction, StationarityTracker, StopGate, TokenThreshold, TurnAbortReason, TurnInput,
-    TurnLifecycleContributor, TurnOptions, TurnOutcome, TurnRuntime, VecConversationState,
-    estimate_conversation_tokens, evaluate_stop_gates, fingerprint_batch, isolation_error,
-    nudge_message,
+    AgentRunResult, ChildToolkit, CompactionOutcome, CompactionStrategy, CompletionToolGate,
+    ConversationState, DEFAULT_MAX_CONCURRENT_CHILDREN, DEFAULT_MAX_SPAWN_DEPTH, EventBus,
+    EventSink, GateChain, GateDecision, HARD_STOP_THRESHOLD, InProcessHost, InProcessIsolation,
+    IsolationBackend, IsolationEnv, LifecycleFanout, MaxMessages, MetricsSink, NUDGE_THRESHOLD,
+    NoopLifecycle, NoopMetrics, Session, SessionHost, SharedMetrics, SpawnAgentTool, SpawnOpts,
+    StationarityAction, StationarityTracker, StopGate, TokenThreshold, TrustedExecution,
+    TurnAbortReason, TurnInput, TurnLifecycleContributor, TurnOptions, TurnOutcome, TurnRuntime,
+    VecConversationState, estimate_conversation_tokens, evaluate_stop_gates, fingerprint_batch,
+    isolation_error, nudge_message,
 };
 #[cfg(all(feature = "runtime", feature = "workflow"))]
 pub use ovo_runtime::{
@@ -93,11 +98,13 @@ pub use ovo_runtime::{
 pub use ovo_sandbox as sandbox;
 #[cfg(all(feature = "landlock", target_os = "linux"))]
 pub use ovo_sandbox::LandlockBackend;
+#[cfg(all(feature = "sandbox", not(feature = "runtime")))]
+pub use ovo_sandbox::TrustedExecution;
 #[cfg(feature = "sandbox")]
 pub use ovo_sandbox::{
     AllowAllExecPolicy, DenyAllExecPolicy, ExecDecision, ExecPolicy, FsPolicy, NetPolicy,
     NoSandbox, PrefixExecPolicy, PrefixRule, SandboxBackend, SandboxError, SandboxPolicy,
-    SharedExecPolicy, TrustedExecution,
+    SharedExecPolicy,
 };
 #[cfg(all(feature = "seatbelt", target_os = "macos"))]
 pub use ovo_sandbox::{SANDBOX_EXEC, SeatbeltBackend};
@@ -115,8 +122,39 @@ pub use ovo_toolkit as toolkit;
 #[cfg(feature = "toolkit")]
 pub use ovo_toolkit::{
     ExecSessionTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool, default_toolkit,
-    glob_match, resolve_jailed,
+    glob_match, platform_sandbox, resolve_jailed, trusted_toolkit,
 };
+
+/// Production host: sandboxed [`default_toolkit`] + [`ChildToolkit`] rebuild.
+/// Not an inherent method on [`InProcessHost`] (kernel must not compile toolkit).
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::HostIsolation`] when `jail` cannot be canonicalized or
+/// toolkit construction fails.
+#[cfg(all(feature = "runtime", feature = "toolkit"))]
+pub fn sandboxed_host(
+    sampler: Arc<dyn LlmSampler>,
+    backend: Arc<dyn SandboxBackend>,
+    jail: PathBuf,
+) -> Result<InProcessHost> {
+    let root = std::fs::canonicalize(&jail)
+        .map_err(|e| OvoError::new(ErrorCode::HostIsolation, e.to_string()))?;
+    let tools = default_toolkit(root.clone(), Arc::clone(&backend))
+        .map_err(|e| OvoError::new(ErrorCode::HostIsolation, e.to_string()))?;
+    let backend_f = Arc::clone(&backend);
+    let jail_f = root.clone();
+    Ok(
+        InProcessHost::new(sampler, tools).with_child_toolkit(Arc::new(
+            move |env: &IsolationEnv| {
+                let dir = env.cwd.clone().unwrap_or_else(|| jail_f.clone());
+                default_toolkit(dir, Arc::clone(&backend_f))
+                    .map_err(|e| OvoError::new(ErrorCode::HostIsolation, e.to_string()))
+            },
+        )),
+    )
+}
+
 #[cfg(feature = "runtime")]
 pub use ovo_tools as tools;
 #[cfg(feature = "runtime")]

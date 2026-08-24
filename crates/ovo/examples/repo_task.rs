@@ -1,5 +1,7 @@
 //! Agent + jailed toolkit writes a file (offline mock).
 //!
+//! 非 S-plane：AutoApprove + trusted shell。生产用 `TurnOptions::for_host` + `sandboxed_host`.
+//!
 //! ```bash
 //! cargo run -p ovo --example repo_task --features toolkit
 //! ```
@@ -14,7 +16,7 @@ use std::sync::Arc;
 
 use ovo::{
     AgentBuilder, Message, MockSampler, PrometheusRecorder, SharedMetrics, ToolCall, ToolCallId,
-    TurnInput, TurnOptions, TurnRuntime, VecConversationState, default_toolkit,
+    TrustedExecution, TurnInput, TurnOptions, TurnRuntime, VecConversationState, trusted_toolkit,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -37,7 +39,7 @@ async fn main() {
     }]));
     sampler.push_text("Wrote hello.txt under the workspace jail.");
 
-    let tools = default_toolkit(&jail);
+    let tools = trusted_toolkit(&jail, TrustedExecution);
     let agent = AgentBuilder::named("coder")
         .instructions("Use write_file to create files. Keep answers short.")
         .model("mock")

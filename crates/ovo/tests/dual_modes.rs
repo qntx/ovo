@@ -733,6 +733,23 @@ mod dual {
         assert_eq!(host.agents_spent(), 2, "fork + resume each charge budget");
     }
 
+    #[cfg(feature = "toolkit")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sandboxed_host_rejects_missing_jail() {
+        use std::path::PathBuf;
+
+        use ovo::{NoSandbox, sandboxed_host};
+
+        let sampler: Arc<dyn LlmSampler> = Arc::new(MockSampler::new());
+        let err = sandboxed_host(
+            sampler,
+            Arc::new(NoSandbox),
+            PathBuf::from("/no/such/ovo-sandboxed-host-jail"),
+        )
+        .expect_err("missing jail");
+        assert_eq!(err.code(), ErrorCode::HostIsolation);
+    }
+
     // state / ledger
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

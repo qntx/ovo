@@ -1,4 +1,6 @@
 //! Offline turn with `MockSampler` (no network).
+//!
+//! 非 S-plane：AutoApprove（无 Destructive 工具）。生产用 `TurnOptions::for_host` + `sandboxed_host`.
 #![allow(
     clippy::print_stdout,
     clippy::expect_used,

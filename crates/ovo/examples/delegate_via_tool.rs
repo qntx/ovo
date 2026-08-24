@@ -1,4 +1,8 @@
 //! Model-driven dynamic delegation: parent agent calls `spawn_agent` tool.
+//!
+//! Parent-only `SpawnAgentTool`: host tools stay empty (no second `InProcessHost`).
+//! Spawn metadata is not Destructive, so `TurnOptions::default` is fine.
+//! 非 S-plane：AutoApprove。生产用 `TurnOptions::for_host` + `sandboxed_host`.
 #![allow(
     clippy::print_stdout,
     clippy::expect_used,

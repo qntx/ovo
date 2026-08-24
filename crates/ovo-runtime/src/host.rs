@@ -2,7 +2,11 @@
 //!
 //! # Limits (fail-closed)
 //!
-//! - **`agent_budget`** — absolute number of admitted spawns for this host
+//! - **`agent_budget`** — admitted spawns for this host. [`InProcessHost::new`]
+//!   defaults to [`ovo_workflow::DEFAULT_AGENT_BUDGET`] (128);
+//!   [`InProcessHost::with_agent_budget`] caps at
+//!   [`ovo_workflow::MAX_AGENT_BUDGET`] (1024). Unlimited only via
+//!   [`InProcessHost::with_unlimited_agent_budget`].
 //! - **`max_spawn_depth`** — max nesting index (`depth` on [`SpawnOpts`]); `depth >= max` rejects
 //! - **`max_concurrent_children`** — simultaneous in-flight spawns (try-acquire; no queue)
 
@@ -20,7 +24,7 @@ use ovo_obs::{NoopMetrics, SharedMetrics, record_spawn};
 use ovo_protocol::TurnEventKind;
 use ovo_state::ChatStateHandle;
 use ovo_tools::registry::CapabilityMode;
-use ovo_tools::{EventBus, SharedTool};
+use ovo_tools::{ApprovalGate, ApprovalPolicy, EventBus, SharedTool};
 use ovo_types::{AgentId, ErrorCode, Message, OvoError, Usage};
 use ovo_workflow::{WorkflowRunStatus, WorkflowRunStore};
 use serde_json::Value;
@@ -28,7 +32,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, info_span};
 
-use crate::isolation::{InProcessIsolation, IsolationBackend};
+use crate::isolation::{InProcessIsolation, IsolationBackend, IsolationEnv};
 use crate::state::VecConversationState;
 use crate::turn::{TurnInput, TurnOptions, TurnRuntime};
 
@@ -213,7 +217,23 @@ pub trait SessionHost: Send + Sync {
     }
 }
 
+/// Rebuilds the child tool pool from the isolation environment.
+///
+/// Production wiring lives on the facade (`sandboxed_host`); the kernel must
+/// not compile `ovo-toolkit`. Factory failure is fail-closed (same path as
+/// [`InProcessHost`] build errors: cleanup, refund, `SpawnFinished` false).
+pub type ChildToolkit =
+    Arc<dyn Fn(&IsolationEnv) -> Result<Vec<SharedTool>, OvoError> + Send + Sync>;
+
 /// In-process host: nested [`TurnRuntime`] with shared sampler, tool pool, and limits.
+///
+/// [`InProcessHost::new`] is a test convenience: child agents clone `tools`
+/// unless [`Self::with_child_toolkit`] is set; agent budget defaults to 128;
+/// approval defaults to [`ovo_tools::AlwaysDeny`]. Passing `trusted_toolkit`
+/// still means child processes are trusted.
+///
+/// There is no `InProcessHost::sandboxed`. Production wiring is facade
+/// `sandboxed_host` (`feature = "toolkit"`).
 pub struct InProcessHost {
     sampler: Arc<dyn LlmSampler>,
     tools: Vec<SharedTool>,
@@ -238,6 +258,8 @@ pub struct InProcessHost {
     parent_handle: Option<ChatStateHandle>,
     /// Workflow run store for `resume_from` lookups.
     run_store: Option<Arc<dyn WorkflowRunStore>>,
+    approval: Arc<dyn ApprovalGate>,
+    child_toolkit: Option<ChildToolkit>,
 }
 
 impl std::fmt::Debug for InProcessHost {
@@ -252,12 +274,17 @@ impl std::fmt::Debug for InProcessHost {
             .field("max_concurrent_children", &self.max_concurrent_children)
             .field("agent_registry", &self.agent_registry.len())
             .field("isolation", &self.isolation.name())
+            .field("has_approval", &true)
+            .field("has_child_toolkit", &self.child_toolkit.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl InProcessHost {
-    /// Create a host with default depth/concurrency caps and unlimited agent budget.
+    /// Create a host with default depth/concurrency caps, budget 128, and [`ovo_tools::AlwaysDeny`].
+    ///
+    /// Test convenience: children clone `tools` unless [`Self::with_child_toolkit`]
+    /// is set. Production factory is facade `sandboxed_host`.
     #[must_use]
     pub fn new(sampler: Arc<dyn LlmSampler>, tools: Vec<SharedTool>) -> Self {
         Self {
@@ -265,7 +292,7 @@ impl InProcessHost {
             tools,
             base_instructions: "You are a focused sub-agent. Complete the task.".into(),
             runtime: TurnRuntime::new(),
-            agent_budget: None,
+            agent_budget: Some(ovo_workflow::DEFAULT_AGENT_BUDGET),
             spent: AtomicU64::new(0),
             max_spawn_depth: Some(DEFAULT_MAX_SPAWN_DEPTH),
             concurrency: Some(Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_CHILDREN))),
@@ -276,13 +303,38 @@ impl InProcessHost {
             metrics: Arc::new(NoopMetrics),
             parent_handle: None,
             run_store: None,
+            approval: Arc::new(ovo_tools::AlwaysDeny),
+            child_toolkit: None,
         }
     }
 
     /// Absolute agent-call budget for this host (every successful admission counts 1).
+    ///
+    /// Values above [`ovo_workflow::MAX_AGENT_BUDGET`] are capped at 1024.
     #[must_use]
-    pub const fn with_agent_budget(mut self, budget: u64) -> Self {
-        self.agent_budget = Some(budget);
+    pub fn with_agent_budget(mut self, budget: u64) -> Self {
+        self.agent_budget = Some(budget.min(ovo_workflow::MAX_AGENT_BUDGET));
+        self
+    }
+
+    /// Remove the host agent-budget cap. Requires [`crate::TrustedExecution`].
+    #[must_use]
+    pub fn with_unlimited_agent_budget(mut self, _t: crate::TrustedExecution) -> Self {
+        self.agent_budget = None;
+        self
+    }
+
+    /// Approval gate copied onto every child turn (`spawn_one`).
+    #[must_use]
+    pub fn with_approval(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approval = gate;
+        self
+    }
+
+    /// Rebuild child tools from isolation env instead of cloning the parent pool.
+    #[must_use]
+    pub fn with_child_toolkit(mut self, f: ChildToolkit) -> Self {
+        self.child_toolkit = Some(f);
         self
     }
 
@@ -544,18 +596,27 @@ impl InProcessHost {
         mode
     }
 
-    fn build_child(&self, opts: &SpawnOpts) -> Result<Agent, OvoError> {
+    fn build_child(
+        &self,
+        opts: &SpawnOpts,
+        isolation_env: &IsolationEnv,
+    ) -> Result<Agent, OvoError> {
+        let tools = if let Some(f) = &self.child_toolkit {
+            f(isolation_env)?
+        } else {
+            self.tools.clone()
+        };
         let mut builder = if let Some(name) = opts.agent_type.as_deref() {
             let def = self.agent_registry.require(name)?.clone();
             let system = self.prompt_assembler.assemble(&def)?;
             AgentBuilder::from_definition(def)
                 .instructions(system)
-                .tools(self.tools.clone())
+                .tools(tools)
         } else {
             let name = opts.label.clone().unwrap_or_else(|| "subagent".to_owned());
             AgentBuilder::named(name)
                 .instructions(self.base_instructions.clone())
-                .tools(self.tools.clone())
+                .tools(tools)
         };
 
         if let Some(model) = &opts.model {
@@ -649,7 +710,7 @@ impl InProcessHost {
                 }
             };
             let started = Instant::now();
-            let agent = match self.build_child(&opts) {
+            let agent = match self.build_child(&opts, &isolation_env) {
                 Ok(a) => a,
                 Err(e) => {
                     let _ = self.isolation.cleanup(&isolation_env).await;
@@ -689,6 +750,8 @@ impl InProcessHost {
                 max_output_tokens,
                 cwd: isolation_env.cwd.clone(),
                 events: opts.events.clone(),
+                approval: Arc::clone(&self.approval),
+                approval_policy: ApprovalPolicy::Destructive,
                 ..TurnOptions::default()
             };
             // Once the turn starts, the slot is consumed even on error.
@@ -794,9 +857,11 @@ impl SessionHost for InProcessHost {
 )]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use ovo_llm::MockSampler;
-    use ovo_types::ErrorCode;
+    use ovo_tools::{DynTool, ToolCallContext, ToolMetadata, ToolResult};
+    use ovo_types::{ErrorCode, Message, ToolCall, ToolCallId};
     use serde_json::json;
 
     use super::*;
@@ -1157,6 +1222,190 @@ mod tests {
             host.agents_spent(),
             0,
             "pre-start isolation failure refunds budget"
+        );
+    }
+
+    #[test]
+    fn new_default_budget_is_128() {
+        let sampler = Arc::new(MockSampler::new());
+        let host = InProcessHost::new(sampler, vec![]);
+        assert_eq!(host.agents_remaining(), Some(128));
+    }
+
+    #[test]
+    fn with_agent_budget_caps_at_1024() {
+        let sampler = Arc::new(MockSampler::new());
+        let host = InProcessHost::new(sampler, vec![]).with_agent_budget(u64::MAX);
+        assert_eq!(host.agents_remaining(), Some(1024));
+    }
+
+    #[test]
+    fn unlimited_requires_trusted() {
+        let sampler = Arc::new(MockSampler::new());
+        let host = InProcessHost::new(sampler, vec![])
+            .with_unlimited_agent_budget(crate::TrustedExecution);
+        assert_eq!(host.agents_remaining(), None);
+    }
+
+    struct WriteStub {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl DynTool for WriteStub {
+        fn name(&self) -> &'static str {
+            "write_stub"
+        }
+        fn description(&self) -> &'static str {
+            "write"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{}})
+        }
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata::exclusive_write()
+        }
+        async fn call(
+            &self,
+            _ctx: ToolCallContext,
+            _arguments: Value,
+        ) -> Result<ToolResult, OvoError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(ToolResult::text("wrote"))
+        }
+    }
+
+    struct InspectingSampler {
+        inner: MockSampler,
+        saw_denied: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LlmSampler for InspectingSampler {
+        async fn sample(
+            &self,
+            request: ovo_llm::SampleRequest,
+        ) -> Result<ovo_llm::SampleResponse, OvoError> {
+            let texts: String = request.messages.iter().map(Message::text).collect();
+            if texts.contains("approval denied") {
+                self.saw_denied.store(true, Ordering::SeqCst);
+            }
+            self.inner.sample(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_one_uses_host_always_deny() {
+        let called = Arc::new(AtomicBool::new(false));
+        let saw_denied = Arc::new(AtomicBool::new(false));
+        let inner = MockSampler::new();
+        let id = ToolCallId::new("w1").expect("id");
+        inner.push_tools(Message::assistant_tools(vec![ToolCall {
+            id,
+            name: "write_stub".into(),
+            arguments: json!({}),
+        }]));
+        inner.push_text("after-deny");
+        let sampler = Arc::new(InspectingSampler {
+            inner,
+            saw_denied: Arc::clone(&saw_denied),
+        });
+        let host = InProcessHost::new(
+            sampler,
+            vec![Arc::new(WriteStub {
+                called: Arc::clone(&called),
+            })],
+        );
+        let run = host
+            .spawn_agent(SpawnOpts::new("write"))
+            .await
+            .expect("spawn");
+        assert!(run.success);
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "AlwaysDeny must block write"
+        );
+        assert!(
+            saw_denied.load(Ordering::SeqCst),
+            "child tool result must contain approval denied"
+        );
+    }
+
+    struct NamedTool {
+        name: &'static str,
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl DynTool for NamedTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> &'static str {
+            self.name
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{}})
+        }
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata::read_only()
+        }
+        async fn call(
+            &self,
+            _ctx: ToolCallContext,
+            _arguments: Value,
+        ) -> Result<ToolResult, OvoError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::text(self.name))
+        }
+    }
+
+    #[tokio::test]
+    async fn child_toolkit_rebuilds() {
+        let parent_hits = Arc::new(AtomicUsize::new(0));
+        let child_hits = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let sampler = Arc::new(MockSampler::new());
+        let id = ToolCallId::new("c1").expect("id");
+        sampler.push_tools(Message::assistant_tools(vec![ToolCall {
+            id,
+            name: "child_only".into(),
+            arguments: json!({}),
+        }]));
+        sampler.push_text("child-ok");
+
+        let child_hits_f = Arc::clone(&child_hits);
+        let factory_calls_f = Arc::clone(&factory_calls);
+        let host = InProcessHost::new(
+            sampler,
+            vec![Arc::new(NamedTool {
+                name: "parent_only",
+                hits: Arc::clone(&parent_hits),
+            })],
+        )
+        .with_child_toolkit(Arc::new(move |_env: &IsolationEnv| {
+            factory_calls_f.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![Arc::new(NamedTool {
+                name: "child_only",
+                hits: Arc::clone(&child_hits_f),
+            })])
+        }));
+
+        let run = host
+            .spawn_agent(SpawnOpts::new("task"))
+            .await
+            .expect("spawn");
+        assert_eq!(run.output, Value::String("child-ok".into()));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            parent_hits.load(Ordering::SeqCst),
+            0,
+            "parent tools must not be cloned into the child"
+        );
+        assert_eq!(
+            child_hits.load(Ordering::SeqCst),
+            1,
+            "child toolkit tools must run"
         );
     }
 }

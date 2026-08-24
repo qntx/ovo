@@ -10,6 +10,27 @@ land without compatibility layers ([`AGENTS.md`](./AGENTS.md)). A real `1.0` req
 
 ## [Unreleased]
 
+### Breaking
+
+- `default_toolkit(jail, backend) -> Result<_, SandboxError>`; trusted shell is
+  `trusted_toolkit(..., TrustedExecution)`. No one-arg alias.
+- `ShellTool::sandboxed` defaults to `DenyAllExecPolicy`.
+- Sandbox `wrap` does not set stdio (`kill_on_drop(true)` only).
+- `InProcessHost::new`: agent budget 128, approval `AlwaysDeny`; `spawn_one`
+  copies host approval and `ApprovalPolicy::Destructive`.
+- `run_workflow_on_host(None)` (and configured variants) applies budget 128;
+  `None` is not unlimited.
+- `ovo-runtime` depends on `ovo-sandbox` for `TrustedExecution`. It does **not**
+  depend on `ovo-toolkit`. Production factory is facade `sandboxed_host`.
+
+### Added
+
+- Feature `landlock`, `LandlockBackend`, helper bin `ovo-landlock`.
+- `ExecPolicy` family (`PrefixExecPolicy`, `DenyAllExecPolicy`,
+  `AllowAllExecPolicy`, `workspace_shell()`).
+- `TurnOptions::for_host`, facade `sandboxed_host`, `platform_sandbox`,
+  `ChildToolkit`.
+
 ## [0.9.1] — 2026-08-21
 
 Clean-break product-prefix rename. No compatibility layer, dual headers,

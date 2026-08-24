@@ -153,6 +153,17 @@ impl Default for TurnOptions {
 }
 
 impl TurnOptions {
+    /// Production constructor: Destructive policy + caller-supplied gate.
+    /// [`TurnOptions::default`] stays `AutoApprove` for unit tests / offline [`TurnRuntime`].
+    #[must_use]
+    pub fn for_host(gate: Arc<dyn ApprovalGate>) -> Self {
+        Self {
+            approval: gate,
+            approval_policy: ApprovalPolicy::Destructive,
+            ..Self::default()
+        }
+    }
+
     /// Attach a live event channel (new bus for this turn's `run_id`).
     #[must_use]
     pub fn with_event_tx(mut self, tx: mpsc::UnboundedSender<TurnEvent>) -> Self {

@@ -29,7 +29,20 @@ cargo deny check
 
 - Default path is **offline** (`MockSampler`); network providers are feature-gated.
 - Toolkit tools are **cwd-jailed**; do not treat them as a full OS sandbox.
+- cwd-jail ≠ OS sandbox ≠ ExecPolicy allowlist.
 - Default isolation is **in-process** (`InProcessIsolation`). Product sandboxes
   inject a custom `IsolationBackend`.
-- Budget, depth, concurrency, and journal divergence are **fail-closed**.
+- Depth, concurrency, and journal divergence are **always** fail-closed.
+- Host `agent_budget` defaults to 128; `with_agent_budget` caps at 1024.
+  Unlimited budget requires `with_unlimited_agent_budget(TrustedExecution)`.
+- Workflow adapter is a **second** 128 gate (`run_workflow_on_host(None)` → 128),
+  not the same pool as the host counter.
+- Production path: `TurnOptions::for_host` + `sandboxed_host` /
+  `default_toolkit(jail, backend)` + an installed OS backend. Linux helper:
+  same directory as the host binary, `OVO_LANDLOCK_HELPER`, or PATH.
+  `platform_sandbox()` can fail for a pure library dependency.
+  `cargo add ovo` (default features) does **not** compile `ovo-toolkit`; it
+  does compile `ovo-sandbox` (runtime → `TrustedExecution`). Features
+  `toolkit` / `sandbox` still gate re-exports and `sandboxed_host`.
+- `full` does not include OS backends; `--all-features` does.
 - Workflow engine never loads LLM HTTP clients (`ovo-workflow` firewall).

@@ -54,6 +54,10 @@ impl Session {
 
     /// Run one user turn, appending to `state`.
     ///
+    /// Does not rewrite [`TurnOptions`]. Production embedders must pass
+    /// [`TurnOptions::for_host`] themselves; [`TurnOptions::default`] stays
+    /// `AutoApprove` for unit tests.
+    ///
     /// # Errors
     ///
     /// Propagates [`TurnRuntime::run`] failures.

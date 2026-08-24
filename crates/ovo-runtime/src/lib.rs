@@ -25,8 +25,8 @@ pub mod workflow_host;
 pub use events::EventSink;
 pub use gates::{CompletionToolGate, GateChain, GateDecision, StopGate, evaluate_stop_gates};
 pub use host::{
-    AgentRunResult, DEFAULT_MAX_CONCURRENT_CHILDREN, DEFAULT_MAX_SPAWN_DEPTH, InProcessHost,
-    SessionHost, SpawnOpts,
+    AgentRunResult, ChildToolkit, DEFAULT_MAX_CONCURRENT_CHILDREN, DEFAULT_MAX_SPAWN_DEPTH,
+    InProcessHost, SessionHost, SpawnOpts,
 };
 pub use isolation::{InProcessIsolation, IsolationBackend, IsolationEnv, isolation_error};
 pub use lifecycle::{LifecycleFanout, NoopLifecycle, TurnAbortReason, TurnLifecycleContributor};
@@ -39,6 +39,7 @@ pub use metrics::{
 };
 pub use ovo_compaction::{CompactionOutcome, CompactionStrategy, MaxMessages, TokenThreshold};
 pub use ovo_protocol::{TurnEvent, TurnEventKind};
+pub use ovo_sandbox::TrustedExecution;
 pub use ovo_tools::EventBus;
 pub use schema::{
     STRUCTURED_OUTPUT_MAX_RETRIES, compile_schema, schema_retry_reminder,

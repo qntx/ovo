@@ -17,6 +17,7 @@ ovo-compaction = { workspace = true }
 ovo-llm = { workspace = true }
 ovo-obs = { workspace = true }
 ovo-protocol = { workspace = true }
+ovo-sandbox = { workspace = true }
 ovo-state = { workspace = true }
 ovo-tools = { workspace = true }
 ovo-types = { workspace = true }

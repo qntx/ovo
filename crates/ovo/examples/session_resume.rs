@@ -1,5 +1,7 @@
 //! Session source-of-truth + file checkpoint: run, drop handle, reopen, continue.
 //!
+//! 非 S-plane：AutoApprove（无 Destructive 工具）。生产用 `TurnOptions::for_host` + `sandboxed_host`.
+//!
 //! ```bash
 //! cargo run -p ovo --example session_resume --features state
 //! ```

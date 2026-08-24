@@ -7,8 +7,8 @@ use ovo_obs::{NoopMetrics, SharedMetrics, record_workflow_agents, record_workflo
 use ovo_tools::EventBus;
 use ovo_tools::registry::CapabilityMode;
 use ovo_workflow::{
-    AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest, WorkflowOutcome,
-    WorkflowRunParams, run_workflow,
+    AgentOpts, AgentResult, BudgetState, DEFAULT_AGENT_BUDGET, HostError, WorkflowHostRequest,
+    WorkflowOutcome, WorkflowRunParams, run_workflow,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +21,10 @@ use crate::side_effects::WorkflowSideEffects;
 ///
 /// Blocks the calling async task on a worker thread for the Rhai engine while
 /// servicing host requests on the current runtime.
+///
+/// `agent_budget` of `None` applies [`DEFAULT_AGENT_BUDGET`] (128), not
+/// unlimited. This adapter gate is a second counter, independent of the host
+/// spawn budget.
 ///
 /// # Errors
 ///
@@ -77,6 +81,8 @@ pub async fn run_workflow_configured(
 /// Mode B `agent()` / `parallel()` emit the same `SpawnStarted` / `SpawnFinished`
 /// shapes as Mode A when `events` is set.
 ///
+/// `agent_budget` of `None` applies [`DEFAULT_AGENT_BUDGET`] (128), not unlimited.
+///
 /// # Errors
 ///
 /// Same as [`run_workflow_on_host`].
@@ -93,7 +99,7 @@ pub async fn run_workflow_configured_with_events(
     let reserved = Arc::new(AtomicU64::new(0));
     let cancel = params.cancel.clone();
 
-    let budget = agent_budget;
+    let budget = Some(agent_budget.unwrap_or(DEFAULT_AGENT_BUDGET));
     let spent_h = Arc::clone(&spent);
     let reserved_h = Arc::clone(&reserved);
     let cancel_h = cancel.clone();
@@ -562,6 +568,37 @@ mod tests {
         .expect("run");
         assert!(
             matches!(outcome, WorkflowOutcome::BudgetExceeded { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_none_budget_is_default_128() {
+        let sampler = Arc::new(MockSampler::new());
+        sampler.map_user_text("task", "ok");
+        let host: Arc<dyn SessionHost> = Arc::new(InProcessHost::new(sampler, vec![]));
+        let script = r#"
+            let meta = #{ name: "n", description: "none budget" };
+            let r = agent("task");
+            complete(#{ out: r });
+        "#;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let outcome = run_workflow_on_host(
+            host,
+            WorkflowRunParams {
+                script: script.into(),
+                args: serde_json::json!({}),
+                journal: Journal::new(None),
+                host_tx: tx,
+                cancel: CancellationToken::new(),
+                max_ops: WorkflowRunParams::DEFAULT_MAX_OPS,
+            },
+            None,
+        )
+        .await
+        .expect("run");
+        assert!(
+            matches!(outcome, WorkflowOutcome::Completed { .. }),
             "{outcome:?}"
         );
     }

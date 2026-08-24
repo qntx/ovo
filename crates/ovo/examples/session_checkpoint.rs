@@ -1,6 +1,8 @@
 //! Session source-of-truth: `ChatStateHandle` + optional file checkpoint.
 //!
 //! Canonical multi-turn path (not the turn-local `VecConversationState` alone).
+//!
+//! 非 S-plane：AutoApprove（无 Destructive 工具）。生产用 `TurnOptions::for_host` + `sandboxed_host`.
 #![allow(
     clippy::print_stdout,
     clippy::expect_used,

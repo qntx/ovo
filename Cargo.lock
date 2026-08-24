@@ -1164,6 +1164,7 @@ dependencies = [
  "ovo-llm",
  "ovo-obs",
  "ovo-protocol",
+ "ovo-sandbox",
  "ovo-state",
  "ovo-toolkit",
  "ovo-tools",

@@ -24,6 +24,21 @@ fn workflow_cargo_toml_has_no_llm_or_http() {
 }
 
 #[test]
+fn runtime_dependencies_exclude_toolkit() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(root.join("Cargo.toml")).expect("runtime Cargo.toml");
+    let deps = text.split("[dev-dependencies]").next().expect("deps");
+    assert!(
+        !deps.contains("ovo-toolkit"),
+        "ovo-runtime [dependencies] must not include ovo-toolkit"
+    );
+    assert!(
+        deps.contains("ovo-sandbox"),
+        "ovo-runtime [dependencies] includes ovo-sandbox for TrustedExecution"
+    );
+}
+
+#[test]
 fn types_cargo_toml_stays_pure() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let types = root.join("..").join("ovo-types").join("Cargo.toml");

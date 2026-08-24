@@ -16,6 +16,11 @@ use crate::host::{SessionHost, SpawnOpts};
 /// loop: the model calls `spawn_agent`, the tool blocks until the child finishes,
 /// and the child’s output is returned as the tool result.
 ///
+/// Attach this tool to the **parent** agent only (or share the host via
+/// [`std::sync::Arc::new_cyclic`]). Do not construct a second
+/// [`crate::InProcessHost`] for children; children reuse this host (and
+/// optional [`crate::ChildToolkit`]).
+///
 /// Nesting depth is derived from [`ToolCallContext::spawn_depth`]: a top-level
 /// session turn spawns at depth `0`; a host-spawned agent at depth `d` spawns at
 /// `d + 1`.
