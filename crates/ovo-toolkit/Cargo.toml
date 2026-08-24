@@ -19,9 +19,12 @@ landlock = ["ovo-sandbox/landlock"]
 async-trait = { workspace = true }
 ovo-sandbox = { workspace = true }
 ovo-tools = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "macros", "rt", "time", "process"] }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 ovo-types = { workspace = true }

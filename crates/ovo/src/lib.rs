@@ -114,8 +114,8 @@ pub use ovo_state::{
 pub use ovo_toolkit as toolkit;
 #[cfg(feature = "toolkit")]
 pub use ovo_toolkit::{
-    GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool, default_toolkit, glob_match,
-    resolve_jailed,
+    ExecSessionTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool, default_toolkit,
+    glob_match, resolve_jailed,
 };
 #[cfg(feature = "runtime")]
 pub use ovo_tools as tools;

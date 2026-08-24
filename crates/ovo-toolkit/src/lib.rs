@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod exec_session;
 pub mod glob_files;
 pub mod grep;
 pub mod jail;
@@ -18,6 +19,7 @@ pub mod write_file;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use exec_session::ExecSessionTool;
 pub use glob_files::{GlobTool, glob_match};
 pub use grep::GrepTool;
 use ovo_sandbox::TrustedExecution;

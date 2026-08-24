@@ -1209,10 +1209,13 @@ dependencies = [
  "ovo-sandbox",
  "ovo-tools",
  "ovo-types",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
