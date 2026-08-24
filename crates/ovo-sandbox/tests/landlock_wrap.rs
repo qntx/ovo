@@ -3,6 +3,7 @@
     unused_crate_dependencies,
     clippy::expect_used,
     clippy::unwrap_used,
+    clippy::tests_outside_test_module,
     reason = "integration test binary; linux-only body"
 )]
 
@@ -85,7 +86,7 @@ mod linux {
     async fn fs_not_enforced_is_failed() {
         let (_dir, root) = jail_root();
         let policy = fs_rw_net_allowed(root);
-        let mut cmd = Command::new("/bin/true");
+        let cmd = Command::new("/bin/true");
         let mut cmd = helper().wrap(&policy, cmd).expect("wrap");
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -107,7 +108,7 @@ mod linux {
             },
             net: NetPolicy::Denied,
         };
-        let mut probe = Command::new("/bin/true");
+        let probe = Command::new("/bin/true");
         let mut probe = helper().wrap(&policy, probe).expect("wrap");
         probe
             .stdin(Stdio::null())
