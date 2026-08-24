@@ -30,6 +30,7 @@ land without compatibility layers ([`AGENTS.md`](./AGENTS.md)). A real `1.0` req
   `AllowAllExecPolicy`, `workspace_shell()`).
 - `TurnOptions::for_host`, facade `sandboxed_host`, `platform_sandbox`,
   `ChildToolkit`.
+- `ExecSessionTool` (argv-only session; not in `default_toolkit`).
 - CI job `sandbox-macos` (`cargo test -p ovo-sandbox -p ovo-toolkit
   --features seatbelt --all-targets`).
 - README honesty: root Embed section and crates.io page (production
