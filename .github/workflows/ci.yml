@@ -22,3 +22,11 @@ jobs:
       - run: cargo test -p ovo-sandbox -p ovo-toolkit --features landlock --all-targets
         env:
           OVO_LANDLOCK_HELPER: ${{ github.workspace }}/target/debug/ovo-landlock
+
+  sandbox-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ovo-sandbox -p ovo-toolkit --features seatbelt --all-targets
