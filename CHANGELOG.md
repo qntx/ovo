@@ -12,6 +12,9 @@ land without compatibility layers ([`AGENTS.md`](./AGENTS.md)). A real `1.0` req
 
 ### Breaking
 
+- `ExecDecision::Ask` and `ExecDecision::allow_wrap` removed. Two outcomes:
+  `Allow` (enter wrap) and `Deny` (`ErrorCode::ToolDenied`).
+  `PrefixExecPolicy` ranks Deny > Allow. No alias.
 - `default_toolkit(jail, backend) -> Result<_, SandboxError>`; trusted shell is
   `trusted_toolkit(..., TrustedExecution)`. No one-arg alias.
 - `ShellTool::sandboxed` defaults to `DenyAllExecPolicy`.
