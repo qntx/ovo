@@ -23,25 +23,43 @@ const SYSTEM_RO: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/etc", "/dev"];
 #[doc(hidden)]
 pub fn apply_landlock_policy(policy: &SandboxPolicy) -> Result<(), SandboxError> {
     let (ro, rw) = policy_fs_paths(policy)?;
-    let abi = ABI::V1;
+    let v1 = ABI::V1;
+
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(AccessFs::from_all(abi))
+        .handle_access(AccessFs::from_all(v1))
         .map_err(ll_failed)?;
+
+    // Truncate (ABI V3): handle when present; ignore when the kernel lacks it.
+    ruleset = ruleset
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(AccessFs::Truncate)
+        .map_err(ll_failed)?;
+
     if matches!(policy.net, NetPolicy::Denied) {
+        // Restore HardRequirement so ABI < V4 cannot silently keep net.
         ruleset = ruleset
+            .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessNet::BindTcp)
             .map_err(ll_failed)?;
         ruleset = ruleset
             .handle_access(AccessNet::ConnectTcp)
             .map_err(ll_failed)?;
     }
-    let mut created = ruleset.create().map_err(ll_failed)?;
-    created = created
-        .add_rules(path_beneath_rules(SYSTEM_RO, AccessFs::from_read(abi)))
+
+    // Path rules that include Truncate cannot inherit HardRequirement:
+    // tailored_compat_level takes max(parent, child).
+    let mut created = ruleset
+        .set_compatibility(CompatLevel::BestEffort)
+        .create()
         .map_err(ll_failed)?;
-    created = add_policy_paths(created, &ro, AccessFs::from_read(abi))?;
-    created = add_policy_paths(created, &rw, AccessFs::from_all(abi))?;
+
+    created = created
+        .add_rules(path_beneath_rules(SYSTEM_RO, AccessFs::from_read(v1)))
+        .map_err(ll_failed)?;
+    created = add_policy_paths(created, &ro, AccessFs::from_read(v1))?;
+    created = add_policy_paths(created, &rw, AccessFs::from_all(v1) | AccessFs::Truncate)?;
+
     let status = created.restrict_self().map_err(ll_failed)?;
     if matches!(status.ruleset, RulesetStatus::NotEnforced) {
         return Err(SandboxError::Failed("landlock ruleset not enforced".into()));

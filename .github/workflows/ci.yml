@@ -18,6 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy -p ovo-sandbox -p ovo-toolkit --features landlock --all-targets -- -D warnings
       - run: cargo build -p ovo-sandbox --bin ovo-landlock --features landlock
       - run: cargo test -p ovo-sandbox -p ovo-toolkit --features landlock --all-targets
         env:

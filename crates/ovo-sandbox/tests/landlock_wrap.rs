@@ -12,6 +12,7 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
 
+    use landlock::{AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
     use ovo_sandbox::{FsPolicy, LandlockBackend, NetPolicy, SandboxBackend, SandboxPolicy};
     use tokio::process::Command;
 
@@ -30,6 +31,17 @@ mod linux {
         let dir = tempfile::tempdir().expect("temp");
         let root = dir.path().canonicalize().expect("canon");
         (dir, root)
+    }
+
+    fn kernel_handles_truncate() -> bool {
+        Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::Truncate)
+            .is_ok()
+    }
+
+    fn posix_single_quote(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', r#"'"'"'"#))
     }
 
     #[tokio::test]
@@ -156,5 +168,63 @@ mod linux {
             "stdout={:?}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[tokio::test]
+    async fn truncate_outside_jail_denied() {
+        if !kernel_handles_truncate() || !Path::new("/usr/bin/python3").is_file() {
+            return;
+        }
+        let (_dir, root) = jail_root();
+        let outside = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME")
+            .join(format!("ovo_ll_trunc_{}", std::process::id()));
+        std::fs::write(&outside, b"secret-data").expect("out");
+        let policy = fs_rw_net_allowed(root);
+        let mut cmd = Command::new("python3");
+        cmd.arg("-c")
+            .arg("import os,sys; os.truncate(sys.argv[1], 0)")
+            .arg(&outside);
+        let mut cmd = helper().wrap(&policy, cmd).expect("wrap");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = cmd.output().await.expect("exec");
+        let leftover = std::fs::read(&outside).expect("leftover");
+        let _ = std::fs::remove_file(&outside);
+        assert!(
+            !output.status.success(),
+            "outside truncate must fail under landlock, stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            leftover, b"secret-data",
+            "outside file must stay secret-data"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncate_inside_jail_succeeds() {
+        let (_dir, root) = jail_root();
+        let inside = root.join("in.txt");
+        std::fs::write(&inside, b"inside-data").expect("in");
+        let policy = fs_rw_net_allowed(root);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!(": > {}", posix_single_quote(&inside)));
+        let mut cmd = helper().wrap(&policy, cmd).expect("wrap");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = cmd.output().await.expect("exec");
+        assert!(
+            output.status.success(),
+            "inside truncate must succeed under FS Landlock, stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let leftover = std::fs::read(&inside).expect("leftover");
+        assert_eq!(leftover, b"", "inside file must be empty");
     }
 }
