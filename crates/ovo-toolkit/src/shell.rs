@@ -174,13 +174,7 @@ impl DynTool for ShellTool {
                     return Err(ovo_tools::error::codes::cancelled());
                 }
                 let mut cmd = Command::new("sh");
-                cmd.arg("-c")
-                    .arg(&command)
-                    .current_dir(&root)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
+                cmd.arg("-c").arg(&command).current_dir(&root);
 
                 let mut cmd = match &isolation {
                     ShellIsolation::Trusted => cmd,
@@ -193,6 +187,10 @@ impl DynTool for ShellTool {
                         })?
                     }
                 };
+                cmd.stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
 
                 let child = cmd
                     .spawn()
@@ -352,6 +350,72 @@ mod tests {
         assert!(
             out.is_error,
             "outside read must fail under seatbelt: {}",
+            out.content
+        );
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "landlock", target_os = "linux"))]
+    async fn landlock_shell_allows_inside_blocks_outside() {
+        use std::sync::Arc;
+
+        use ovo_sandbox::{FsPolicy, LandlockBackend, NetPolicy, SandboxPolicy};
+
+        let Some(helper) = std::env::var_os("OVO_LANDLOCK_HELPER") else {
+            return;
+        };
+
+        let dir = tempdir().expect("temp");
+        let root = dir.path().canonicalize().expect("canon");
+        std::fs::write(root.join("in.txt"), b"inside-ok").expect("in");
+
+        let outside = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME")
+            .join(format!("ovo_shell_ll_out_{}", std::process::id()));
+        std::fs::write(&outside, b"secret").expect("out");
+
+        let tool = ShellTool::sandboxed(
+            root.clone(),
+            Arc::new(LandlockBackend::with_helper(helper)),
+            SandboxPolicy {
+                fs: FsPolicy::ReadWrite {
+                    paths: vec![root.clone()],
+                },
+                net: NetPolicy::Allowed,
+            },
+        );
+
+        let inside = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(root.clone()),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": format!("cat {}", root.join("in.txt").display())}),
+            )
+            .await
+            .expect("inside");
+        assert!(
+            !inside.is_error && inside.content.contains("inside-ok"),
+            "{}",
+            inside.content
+        );
+
+        let out = tool
+            .call(
+                ToolCallContext {
+                    cwd: Some(root),
+                    ..ToolCallContext::default()
+                },
+                json!({"command": format!("cat {}", outside.display())}),
+            )
+            .await
+            .expect("outside call");
+        assert!(
+            out.is_error,
+            "outside read must fail under landlock: {}",
             out.content
         );
         let _ = std::fs::remove_file(&outside);

@@ -2,14 +2,15 @@
 //!
 //! Enabled with feature `seatbelt` on macOS only.
 
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio as StdStdio;
 
 use tokio::process::Command;
 
-use crate::{FsPolicy, NetPolicy, SandboxBackend, SandboxError, SandboxPolicy};
+use crate::{
+    FsPolicy, NetPolicy, SandboxBackend, SandboxError, SandboxPolicy, require_absolute,
+    take_command_spec,
+};
 
 /// Absolute path to the system seatbelt helper (do not honor PATH).
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -104,17 +105,6 @@ pub fn build_profile(policy: &SandboxPolicy) -> Result<String, SandboxError> {
     Ok(out)
 }
 
-fn require_absolute(p: &Path) -> Result<PathBuf, SandboxError> {
-    if p.is_absolute() {
-        Ok(p.to_path_buf())
-    } else {
-        Err(SandboxError::Denied(format!(
-            "sandbox path must be absolute: {}",
-            p.display()
-        )))
-    }
-}
-
 fn sbpl_escape(p: &Path) -> String {
     p.to_string_lossy()
         .replace('\\', "\\\\")
@@ -122,34 +112,18 @@ fn sbpl_escape(p: &Path) -> String {
 }
 
 fn rewrite_with_seatbelt(cmd: Command, profile: &str) -> Result<Command, SandboxError> {
-    let std = cmd.as_std();
-    let program = std.get_program().to_os_string();
-    let args: Vec<OsString> = std.get_args().map(std::ffi::OsStr::to_os_string).collect();
-    let cwd = std.get_current_dir().map(Path::to_path_buf);
-    let envs: Vec<(OsString, OsString)> = std
-        .get_envs()
-        .filter_map(|(k, v)| v.map(|val| (k.to_os_string(), val.to_os_string())))
-        .collect();
-
+    let spec = take_command_spec(&cmd);
     let mut wrapped = Command::new(SANDBOX_EXEC);
     wrapped.arg("-p").arg(profile);
-    wrapped.arg(&program);
-    for a in args {
-        wrapped.arg(a);
-    }
-    if let Some(dir) = cwd {
+    wrapped.arg(&spec.program);
+    wrapped.args(spec.args);
+    if let Some(dir) = spec.cwd {
         wrapped.current_dir(dir);
     }
-    for (k, v) in envs {
+    for (k, v) in spec.envs {
         wrapped.env(k, v);
     }
-    // Shell sets these before wrap; re-apply defaults (stdio not introspectable).
-    wrapped
-        .stdin(StdStdio::null())
-        .stdout(StdStdio::piped())
-        .stderr(StdStdio::piped())
-        .kill_on_drop(true);
-
+    wrapped.kill_on_drop(true);
     Ok(wrapped)
 }
 

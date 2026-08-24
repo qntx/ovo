@@ -91,6 +91,8 @@ pub use ovo_runtime::{
 };
 #[cfg(feature = "sandbox")]
 pub use ovo_sandbox as sandbox;
+#[cfg(all(feature = "landlock", target_os = "linux"))]
+pub use ovo_sandbox::LandlockBackend;
 #[cfg(feature = "sandbox")]
 pub use ovo_sandbox::{
     FsPolicy, NetPolicy, NoSandbox, SandboxBackend, SandboxError, SandboxPolicy, TrustedExecution,

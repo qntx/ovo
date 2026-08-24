@@ -12,6 +12,8 @@ categories = ["filesystem", "asynchronous"]
 default = []
 # macOS Seatbelt process sandbox (passthrough compile on other OSes).
 seatbelt = ["ovo-sandbox/seatbelt"]
+# Linux Landlock process sandbox (passthrough compile on other OSes).
+landlock = ["ovo-sandbox/landlock"]
 
 [dependencies]
 async-trait = { workspace = true }

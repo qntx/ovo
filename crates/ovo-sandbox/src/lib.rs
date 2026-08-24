@@ -5,11 +5,21 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "landlock", target_os = "linux"))]
+mod landlock;
+#[cfg(target_os = "linux")]
+mod landlock_apply;
 #[cfg(all(feature = "seatbelt", target_os = "macos"))]
 mod seatbelt;
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
+#[cfg(all(feature = "landlock", target_os = "linux"))]
+pub use landlock::LandlockBackend;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use landlock_apply::apply_landlock_policy;
 #[cfg(all(feature = "seatbelt", target_os = "macos"))]
 pub use seatbelt::{SANDBOX_EXEC, SeatbeltBackend, build_profile};
 use serde::{Deserialize, Serialize};
@@ -104,7 +114,8 @@ impl SandboxBackend for NoSandbox {
         "no_sandbox"
     }
 
-    fn wrap(&self, _policy: &SandboxPolicy, cmd: Command) -> Result<Command, SandboxError> {
+    fn wrap(&self, _policy: &SandboxPolicy, mut cmd: Command) -> Result<Command, SandboxError> {
+        cmd.kill_on_drop(true);
         Ok(cmd)
     }
 }
@@ -115,6 +126,49 @@ impl SandboxBackend for NoSandbox {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedExecution;
 
+#[derive(Debug)]
+pub(crate) struct CommandSpec {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    pub cwd: Option<PathBuf>,
+    pub envs: Vec<(OsString, OsString)>,
+}
+
+pub(crate) fn take_command_spec(cmd: &Command) -> CommandSpec {
+    let std = cmd.as_std();
+    CommandSpec {
+        program: std.get_program().to_os_string(),
+        args: std.get_args().map(std::ffi::OsStr::to_os_string).collect(),
+        cwd: std.get_current_dir().map(Path::to_path_buf),
+        envs: std
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|val| (k.to_os_string(), val.to_os_string())))
+            .collect(),
+    }
+}
+
+pub(crate) fn require_absolute(p: &Path) -> Result<PathBuf, SandboxError> {
+    if p.is_absolute() {
+        Ok(p.to_path_buf())
+    } else {
+        Err(SandboxError::Denied(format!(
+            "sandbox path must be absolute: {}",
+            p.display()
+        )))
+    }
+}
+
+#[cfg_attr(
+    not(all(feature = "landlock", target_os = "linux")),
+    allow(
+        dead_code,
+        reason = "JSON policy encoding is used by Landlock wrap; keep serde_json live off Linux"
+    )
+)]
+pub(crate) fn policy_to_json(policy: &SandboxPolicy) -> Result<String, SandboxError> {
+    serde_json::to_string(policy).map_err(|e| SandboxError::Failed(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,7 +176,7 @@ mod tests {
     #[test]
     fn workspace_policy_serde() {
         let p = SandboxPolicy::workspace("/tmp/ws");
-        let raw = serde_json::to_string(&p).expect("ser");
+        let raw = policy_to_json(&p).expect("ser");
         let back: SandboxPolicy = serde_json::from_str(&raw).expect("de");
         assert_eq!(back.net, NetPolicy::Denied);
         assert!(matches!(back.fs, FsPolicy::ReadWrite { .. }));
@@ -134,5 +188,14 @@ mod tests {
         let out = NoSandbox.wrap(&SandboxPolicy::workspace("/tmp"), cmd);
         assert!(out.is_ok());
         assert_eq!(NoSandbox.name(), "no_sandbox");
+    }
+
+    #[test]
+    fn require_absolute_rejects_relative() {
+        let dir = tempfile::tempdir().expect("temp");
+        let got = require_absolute(dir.path()).expect("abs");
+        assert_eq!(got, dir.path());
+        let err = require_absolute(Path::new("relative")).expect_err("rel");
+        assert!(matches!(err, SandboxError::Denied(_)), "{err:?}");
     }
 }

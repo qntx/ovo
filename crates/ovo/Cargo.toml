@@ -17,6 +17,8 @@ toolkit = ["runtime", "dep:ovo-toolkit", "sandbox"]
 sandbox = ["dep:ovo-sandbox"]
 # macOS Seatbelt backend (process sandbox via sandbox-exec).
 seatbelt = ["sandbox", "ovo-sandbox/seatbelt", "ovo-toolkit?/seatbelt"]
+# Linux Landlock backend (process sandbox via ovo-landlock helper).
+landlock = ["sandbox", "ovo-sandbox/landlock", "ovo-toolkit?/landlock"]
 state = ["dep:ovo-state"]
 compaction = ["dep:ovo-compaction"]
 obs = ["dep:ovo-obs"]
