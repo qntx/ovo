@@ -55,6 +55,34 @@ struct Session {
     cancel: CancellationToken,
 }
 
+/// Session taken out of the map for I/O. Reinserts on drop so aborting the
+/// call (dispatch timeout / deadline) does not `kill_on_drop` the child.
+struct HeldSession<'a> {
+    tool: &'a ExecSessionTool,
+    session_id: String,
+    session: Option<Session>,
+}
+
+impl HeldSession<'_> {
+    fn as_mut(&mut self) -> Result<&mut Session, ToolError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| codes::execution("exec_session: session already consumed"))
+    }
+
+    fn discard(mut self) {
+        self.session.take();
+    }
+}
+
+impl Drop for HeldSession<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            let _ = self.tool.put_session(self.session_id.clone(), session);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExecAction {
@@ -230,18 +258,36 @@ impl ExecSessionTool {
         let input = args
             .input
             .ok_or_else(|| codes::invalid_args("write requires input"))?;
-        let mut session = self.take_session(&session_id)?;
-        if ctx.cancel.is_cancelled() || session.cancel.is_cancelled() {
+        let session = self.take_session(&session_id)?;
+        let mut held = HeldSession {
+            tool: self,
+            session_id,
+            session: Some(session),
+        };
+        if ctx.cancel.is_cancelled() || held.as_mut()?.cancel.is_cancelled() {
+            held.discard();
             return Err(codes::cancelled());
         }
-        let write_res = session.stdin.write_all(input.as_bytes()).await;
-        self.put_session(session_id, session)?;
-        write_res.map_err(|e| codes::execution(format!("exec_session write: {e}")))?;
-        Ok(ToolResult {
-            content: "ok".to_owned(),
-            structured: Some(json!({ "ok": true })),
-            is_error: false,
-        })
+        let write_res = {
+            let session = held.as_mut()?;
+            tokio::select! {
+                () = ctx.cancel.cancelled() => None,
+                () = session.cancel.cancelled() => None,
+                r = session.stdin.write_all(input.as_bytes()) => Some(r),
+            }
+        };
+        match write_res {
+            None => {
+                held.discard();
+                Err(codes::cancelled())
+            }
+            Some(Ok(())) => Ok(ToolResult {
+                content: "ok".to_owned(),
+                structured: Some(json!({ "ok": true })),
+                is_error: false,
+            }),
+            Some(Err(e)) => Err(codes::execution(format!("exec_session write: {e}"))),
+        }
     }
 
     async fn action_read(
@@ -250,26 +296,43 @@ impl ExecSessionTool {
         args: ExecSessionArgs,
     ) -> Result<ToolResult, ToolError> {
         let session_id = require_session_id(args.session_id)?;
-        let mut session = self.take_session(&session_id)?;
-        if ctx.cancel.is_cancelled() || session.cancel.is_cancelled() {
+        let session = self.take_session(&session_id)?;
+        let mut held = HeldSession {
+            tool: self,
+            session_id,
+            session: Some(session),
+        };
+        if ctx.cancel.is_cancelled() || held.as_mut()?.cancel.is_cancelled() {
+            held.discard();
             return Err(codes::cancelled());
         }
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();
-        let capture = capture_pipes(
-            &mut session,
-            &mut stdout_buf,
-            &mut stderr_buf,
-            self.max_output,
-            &ctx.cancel,
-        );
-        match tokio::time::timeout(self.timeout, capture).await {
-            Ok(Ok(status)) => Ok(read_result(stdout_buf, stderr_buf, true, !status.success())),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                self.put_session(session_id, session)?;
-                Ok(read_result(stdout_buf, stderr_buf, false, false))
+        let outcome = {
+            let session = held.as_mut()?;
+            tokio::time::timeout(
+                self.timeout,
+                capture_pipes(
+                    session,
+                    &mut stdout_buf,
+                    &mut stderr_buf,
+                    self.max_output,
+                    &ctx.cancel,
+                ),
+            )
+            .await
+        };
+        match outcome {
+            Ok(Ok(CaptureEnd::Exited(status))) => {
+                held.discard();
+                Ok(read_result(stdout_buf, stderr_buf, true, !status.success()))
             }
+            Ok(Ok(CaptureEnd::Cancelled)) => {
+                held.discard();
+                Err(codes::cancelled())
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Ok(read_result(stdout_buf, stderr_buf, false, false)),
         }
     }
 
@@ -404,6 +467,11 @@ fn read_result(stdout: Vec<u8>, stderr: Vec<u8>, exited: bool, is_error: bool) -
     }
 }
 
+enum CaptureEnd {
+    Exited(ExitStatus),
+    Cancelled,
+}
+
 enum PipeEvent {
     Cancel,
     Exit(std::io::Result<ExitStatus>),
@@ -417,7 +485,7 @@ async fn capture_pipes(
     stderr_buf: &mut Vec<u8>,
     max_output: usize,
     call_cancel: &CancellationToken,
-) -> Result<ExitStatus, ToolError> {
+) -> Result<CaptureEnd, ToolError> {
     let mut tmp_out = [0u8; 4096];
     let mut tmp_err = [0u8; 4096];
     let mut stdout_eof = false;
@@ -428,7 +496,7 @@ async fn capture_pipes(
             && stdout_eof
             && stderr_eof
         {
-            return Ok(status);
+            return Ok(CaptureEnd::Exited(status));
         }
         let event = tokio::select! {
             () = call_cancel.cancelled() => PipeEvent::Cancel,
@@ -438,7 +506,7 @@ async fn capture_pipes(
             r = session.stderr.read(&mut tmp_err), if !stderr_eof => PipeEvent::Stderr(r),
         };
         match event {
-            PipeEvent::Cancel => return Err(codes::cancelled()),
+            PipeEvent::Cancel => return Ok(CaptureEnd::Cancelled),
             PipeEvent::Exit(r) => {
                 exit_status =
                     Some(r.map_err(|e| codes::execution(format!("exec_session wait: {e}")))?);
@@ -482,7 +550,8 @@ mod tests {
     use std::time::Duration;
 
     use ovo_sandbox::{AllowAllExecPolicy, NoSandbox, SandboxError};
-    use ovo_types::ErrorCode;
+    use ovo_tools::{DispatchRequest, ToolDispatch, ToolRegistry};
+    use ovo_types::{Deadline, ErrorCode, ToolCall, ToolCallId};
     use tempfile::tempdir;
 
     use super::*;
@@ -729,9 +798,143 @@ mod tests {
                 .await
                 .expect_err("cancelled");
             assert_eq!(err.code(), ErrorCode::ToolCancelled);
+            for arguments in [
+                json!({ "action": "read", "session_id": id }),
+                json!({ "action": "write", "session_id": id, "input": "x" }),
+                json!({ "action": "close", "session_id": id }),
+            ] {
+                let follow = tool
+                    .call(call_ctx.clone(), arguments)
+                    .await
+                    .expect_err("gone");
+                assert!(
+                    matches!(
+                        follow.code(),
+                        ErrorCode::ToolInvalidArgs | ErrorCode::ToolCancelled
+                    ),
+                    "{follow:?}"
+                );
+            }
         })
         .await
         .expect("cancel must not hang");
+    }
+
+    #[tokio::test]
+    async fn write_cancel_kills_child() {
+        let dir = tempdir().expect("temp");
+        let tool = session_tool(dir.path());
+        let call_ctx = ctx(dir.path());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let started = start_cmd(&tool, call_ctx.clone(), &["/bin/sleep", "30"]).await;
+            let id = session_id(&started);
+            let input = "x".repeat(256 * 1024);
+            let write = tool.call(
+                call_ctx.clone(),
+                json!({ "action": "write", "session_id": id, "input": input }),
+            );
+            tokio::pin!(write);
+            let still_pending = tokio::time::timeout(Duration::from_millis(50), &mut write)
+                .await
+                .is_err();
+            assert!(still_pending, "write completed before cancel");
+            call_ctx.cancel.cancel();
+            let err = write.await.expect_err("cancelled");
+            assert_eq!(err.code(), ErrorCode::ToolCancelled);
+            let follow = tool
+                .call(call_ctx, json!({ "action": "read", "session_id": id }))
+                .await
+                .expect_err("gone");
+            assert!(
+                matches!(
+                    follow.code(),
+                    ErrorCode::ToolInvalidArgs | ErrorCode::ToolCancelled
+                ),
+                "{follow:?}"
+            );
+        })
+        .await
+        .expect("write cancel must not hang");
+    }
+
+    #[tokio::test]
+    async fn read_timeout_keeps_session() {
+        let dir = tempdir().expect("temp");
+        let tool = session_tool(dir.path()).with_timeout(Duration::from_millis(200));
+        let call_ctx = ctx(dir.path());
+        let started = start_cmd(&tool, call_ctx.clone(), &["/bin/sleep", "30"]).await;
+        let id = session_id(&started);
+        let read = tool
+            .call(
+                call_ctx.clone(),
+                json!({ "action": "read", "session_id": id }),
+            )
+            .await
+            .expect("read");
+        assert_eq!(
+            structured(&read).get("exited").and_then(Value::as_bool),
+            Some(false),
+            "{}",
+            read.content
+        );
+        tool.call(call_ctx, json!({ "action": "close", "session_id": id }))
+            .await
+            .expect("session still live");
+    }
+
+    #[tokio::test]
+    async fn dispatch_deadline_restores_session() {
+        let dir = tempdir().expect("temp");
+        let tool = Arc::new(session_tool(dir.path()).with_timeout(Duration::from_millis(200)));
+        let call_ctx = ctx(dir.path());
+        let started = start_cmd(tool.as_ref(), call_ctx.clone(), &["/bin/sleep", "30"]).await;
+        let id = session_id(&started);
+        let shared: Arc<dyn DynTool> = tool.clone();
+        let registry = ToolRegistry::from_tools(vec![shared]);
+        let read_ctx = ToolCallContext {
+            cwd: Some(dir.path().to_path_buf()),
+            deadline: Some(Deadline::after(Duration::from_millis(50))),
+            ..ToolCallContext::default()
+        };
+        let outs = tokio::time::timeout(
+            Duration::from_secs(2),
+            ToolDispatch::default().execute_batch(
+                &registry,
+                read_ctx,
+                vec![DispatchRequest {
+                    call: ToolCall {
+                        id: ToolCallId::new("r1").expect("id"),
+                        name: "exec_session".into(),
+                        arguments: json!({ "action": "read", "session_id": id }),
+                    },
+                }],
+            ),
+        )
+        .await
+        .expect("dispatch must not hang");
+        let err = outs
+            .first()
+            .expect("one")
+            .result
+            .as_ref()
+            .expect_err("timeout");
+        assert_eq!(err.code(), ErrorCode::ToolTimeout);
+        let follow = tool
+            .call(
+                call_ctx.clone(),
+                json!({ "action": "read", "session_id": id }),
+            )
+            .await
+            .expect("session survived dispatch abort");
+        assert_eq!(
+            structured(&follow).get("exited").and_then(Value::as_bool),
+            Some(false),
+            "{}",
+            follow.content
+        );
+        tool.call(call_ctx, json!({ "action": "close", "session_id": id }))
+            .await
+            .expect("close live session");
     }
 
     #[tokio::test]
