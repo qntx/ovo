@@ -39,6 +39,15 @@ land without compatibility layers ([`AGENTS.md`](./AGENTS.md)). A real `1.0` req
 - README honesty: root Embed section and crates.io page (production
   constructors, feature boundaries, Linux helper contract).
 
+### Fixed
+
+- Landlock: handle `AccessFs::Truncate` (ABI V3) with per-call BestEffort
+  after HardRequire FS V1. Kernels ≥ 6.2 deny pathname `truncate(2)` /
+  `ftruncate(2)` outside the jail. `NetPolicy::Denied` remains
+  HardRequirement. RW jail paths grant Truncate so in-jail `O_TRUNC`
+  writes keep working. FS-only tests still fail if `restrict_self` is
+  `NotEnforced`.
+
 ## [0.9.1] — 2026-08-21
 
 Clean-break product-prefix rename. No compatibility layer, dual headers,
