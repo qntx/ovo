@@ -4,24 +4,14 @@ use std::sync::Arc;
 
 /// Decision for a candidate argv.
 ///
-/// Not `non_exhaustive`: W8 has no extension path, and toolkit crates must
-/// exhaustively match (or call [`ExecDecision::allow_wrap`]) without a `_` arm.
+/// Not `non_exhaustive`: W8 has two outcomes (wrap or `ToolDenied`) and
+/// toolkit crates must match exhaustively without a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExecDecision {
     /// Enter `SandboxBackend::wrap`. Does **not** skip `ApprovalPolicy::Destructive`.
     Allow,
-    /// Reserved. W8 tools map this to [`ExecDecision::Deny`].
-    Ask,
     /// Do not wrap; tool returns `ErrorCode::ToolDenied`.
     Deny,
-}
-
-impl ExecDecision {
-    /// W8: only [`Self::Allow`] enters wrap. Ask and Deny do not.
-    #[must_use]
-    pub const fn allow_wrap(self) -> bool {
-        matches!(self, Self::Allow)
-    }
 }
 
 /// Argv policy consulted inside the tool, before wrap.
@@ -30,7 +20,7 @@ pub trait ExecPolicy: Send + Sync + std::fmt::Debug {
     fn decide(&self, argv: &[String]) -> ExecDecision;
 }
 
-/// Most severe match wins: Deny > Ask > Allow. Unmatched → Deny.
+/// Most severe match wins: **Deny > Allow**. Unmatched → Deny.
 #[derive(Debug, Clone)]
 pub struct PrefixExecPolicy {
     rules: Vec<PrefixRule>,

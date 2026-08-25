@@ -195,8 +195,11 @@ impl ExecSessionTool {
             .command
             .filter(|c| !c.is_empty())
             .ok_or_else(|| codes::invalid_args("start requires non-empty command"))?;
-        if !self.exec_policy.decide(&command).allow_wrap() {
-            return Err(codes::denied("exec policy: deny"));
+        match self.exec_policy.decide(&command) {
+            ovo_sandbox::ExecDecision::Allow => {}
+            ovo_sandbox::ExecDecision::Deny => {
+                return Err(codes::denied("exec policy: deny"));
+            }
         }
         {
             let g = self.lock_sessions()?;

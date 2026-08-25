@@ -205,8 +205,11 @@ impl DynTool for ShellTool {
                 if tokens.is_empty() {
                     return Err(ovo_tools::error::codes::denied("exec policy: deny"));
                 }
-                if !exec_policy.decide(&tokens).allow_wrap() {
-                    return Err(ovo_tools::error::codes::denied("exec policy: deny"));
+                match exec_policy.decide(&tokens) {
+                    ovo_sandbox::ExecDecision::Allow => {}
+                    ovo_sandbox::ExecDecision::Deny => {
+                        return Err(ovo_tools::error::codes::denied("exec policy: deny"));
+                    }
                 }
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(&command).current_dir(&root);
@@ -297,7 +300,7 @@ fn truncate_in_place(s: &mut String, max: usize) {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ovo_sandbox::{ExecDecision, SandboxError};
+    use ovo_sandbox::SandboxError;
     use ovo_types::ErrorCode;
     use tempfile::tempdir;
 
@@ -327,15 +330,6 @@ mod tests {
             }
             copied.kill_on_drop(true);
             Ok(copied)
-        }
-    }
-
-    #[derive(Debug)]
-    struct AskAllExecPolicy;
-
-    impl ExecPolicy for AskAllExecPolicy {
-        fn decide(&self, _argv: &[String]) -> ExecDecision {
-            ExecDecision::Ask
         }
     }
 
@@ -576,30 +570,6 @@ mod tests {
             .await
             .expect_err("denied");
         assert_eq!(err.code(), ErrorCode::ToolDenied);
-    }
-
-    #[tokio::test]
-    async fn ask_maps_to_denied() {
-        let dir = tempdir().expect("temp");
-        let backend = Arc::new(CountingBackend {
-            wraps: AtomicUsize::new(0),
-        });
-        let isolation: Arc<dyn SandboxBackend> = backend.clone();
-        let tool =
-            ShellTool::sandboxed(dir.path(), isolation, SandboxPolicy::workspace(dir.path()))
-                .with_exec_policy(Arc::new(AskAllExecPolicy));
-        let err = tool
-            .call(
-                ToolCallContext {
-                    cwd: Some(dir.path().to_path_buf()),
-                    ..ToolCallContext::default()
-                },
-                json!({"command": "echo hi"}),
-            )
-            .await
-            .expect_err("denied");
-        assert_eq!(err.code(), ErrorCode::ToolDenied);
-        assert_eq!(backend.wraps.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
