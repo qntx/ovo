@@ -1,0 +1,20 @@
+# Caller owns on:. Pin at @v2.
+# Enable "Allow auto-merge" on the repository. This workflow does not approve.
+# If branch protection requires reviews, add a ruleset bypass for dependabot
+# or pass TOKEN (a PAT/App) that can enable auto-merge. Do not checkout the PR.
+name: Dependabot
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: qntx/workflows/.github/workflows/ops-dependabot.yml@v2
