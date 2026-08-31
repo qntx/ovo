@@ -1,11 +1,15 @@
 # Caller owns on:. Pin at @v2.
-# Enable "Allow auto-merge" on the repository. This workflow does not approve.
-# If branch protection requires reviews, add a ruleset bypass for dependabot
-# or pass TOKEN (a PAT/App) that can enable auto-merge. Do not checkout the PR.
+# pull_request: try to queue GitHub auto-merge (no-op without required checks).
+# schedule: squash-merge Dependabot PRs whose checks are green.
+# Do not checkout the PR. This workflow does not approve.
+# If rulesets require reviews, add a bypass for Dependabot or pass TOKEN.
 name: Dependabot
 
 on:
   pull_request:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,7 +17,9 @@ permissions:
 
 jobs:
   merge:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.user.login == 'dependabot[bot]'
     permissions:
       contents: write
       pull-requests: write
