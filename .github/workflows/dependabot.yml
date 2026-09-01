@@ -1,6 +1,7 @@
 # Caller owns on:. Pin at @v2.
-# schedule: squash-merge Dependabot PRs whose checks are green.
-# workflow_dispatch: same sweep. Do not checkout the PR. Does not approve.
+# schedule / workflow_dispatch squash-merge green Dependabot PRs.
+# Public cron is */15 * * * *. Private callers use 0 */6 * * *.
+# Do not checkout the PR. Does not approve.
 name: Dependabot
 
 on:
@@ -11,10 +12,14 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  checks: read
+  actions: read
 
 jobs:
   merge:
     permissions:
       contents: write
       pull-requests: write
+      checks: read
+      actions: read
     uses: qntx/workflows/.github/workflows/ops-dependabot.yml@v2
