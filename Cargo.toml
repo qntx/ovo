@@ -30,7 +30,7 @@ ovo-sandbox = { version = "0.9.1", path = "crates/ovo-sandbox" }
 
 async-trait = "0.1.92"
 futures = "0.3.34"
-jsonschema = { version = "0.50.1", default-features = false }
+jsonschema = { version = "0.52.0", default-features = false }
 libc = "0.2.189"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 rhai = { version = "1.25.1", default-features = false, features = ["std", "sync", "serde"] }
