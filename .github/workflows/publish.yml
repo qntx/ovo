@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   publish:
-    uses: qntx/workflows/.github/workflows/publish-crates.yml@v2.0.0
+    uses: qntx/workflows/.github/workflows/publish-crates.yml@v2
     permissions:
       contents: read
     with:
