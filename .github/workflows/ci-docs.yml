@@ -1,0 +1,18 @@
+# Caller owns on:. Pin at @v2.
+# Do not set jobs.docs.name: the required check is docs / ci.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    uses: qntx/workflows/.github/workflows/ci-docs.yml@v2
+    permissions:
+      contents: read
